@@ -3,3 +3,4 @@ torch
 pytorch-transformers 
 # datasets
 #transformers[sentencepiece]
+sklearn

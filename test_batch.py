@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from mido import Message
-from .main import BLANK, WINDOW_SIZE, NOTES, slice_midi_tracks, MidiFileToBatchEntry
+from .main import BLANK, WINDOW_SIZE, NOTES, slice_midi_tracks, midi_file_to_batch_entry
 
 
 MIDI_NOTE = 69
@@ -54,7 +54,7 @@ def test_slicing_with_only_special_messages():
 
 
 def test_read_midi():
-    new_song_notes = MidiFileToBatchEntry("new_song.mid")
+    new_song_notes = midi_file_to_batch_entry("new_song.mid")
     note = [0] * NOTES
     note[MIDI_NOTE] = 1
     note = torch.tensor(note)
