@@ -1,2 +1,5 @@
 mido
 torch
+pytorch-transformers 
+# datasets
+#transformers[sentencepiece]
