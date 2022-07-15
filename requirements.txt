@@ -4,3 +4,4 @@ pytorch-transformers
 # datasets
 #transformers[sentencepiece]
 sklearn
+numpy
