@@ -17,14 +17,17 @@ import numpy as np
 from typing import List
 from heapq import heappush, heappop, nsmallest
 
+BATCH_SIZE = 16
+
 midi_directory = "lmd_matched"
 fmidi = "lmd_matched/L/Z/U/TRLZURC128E079376E/cad555c70af4bd043445920c8bcb4b00.mid"
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-EPOCHS = 500
+TEST = False
+EPOCHS = 1 if TEST else 500
 # Embedding dimension
 MIDI_NOTES = 128
 NOTES = MIDI_NOTES + 1 + 1  # START + STOP
-WINDOW_SIZE = 50
+WINDOW_SIZE = 30
 WINDOW_SLIDE = 20
 WINDOW_INPUT = WINDOW_SIZE - 1
 
@@ -224,6 +227,8 @@ if __name__ == "__main__":
         midi_files += [os.path.join(dirpath, file) for file in filenames]
 
     fmidi_notes = torch.empty((0))
+    if TEST:
+        midi_files = midi_files[:1]
     for midi_file in midi_files:
         fmidi_notes = torch.cat((fmidi_notes, midi_file_to_batch_entry(fmidi)))
 
@@ -238,7 +243,7 @@ if __name__ == "__main__":
     # Other choices: SGD, ...
     optim = AdamW(model.parameters(), lr=5e-5)
 
-    train_loader = DataLoader(x_train, batch_size=16, shuffle=True)
+    train_loader = DataLoader(x_train, batch_size=BATCH_SIZE, shuffle=True)
     criterion = CrossEntropyLoss()
 
     for epoch in range(EPOCHS):
@@ -250,7 +255,7 @@ if __name__ == "__main__":
         print('-' * 89)
     print("Apprentissage terminé !!")
 
-    src_mask = generate_square_subsequent_mask(WINDOW_SIZE - 1)
+    src_mask = generate_square_subsequent_mask(WINDOW_INPUT)
     log_softmax = torch.nn.LogSoftmax(dim=1)
     with torch.no_grad():
         model.eval()
@@ -282,3 +287,5 @@ if __name__ == "__main__":
     result = result + generated.tolist()
 
     save_to_midi(result)
+
+    # print([layer.self_attn for layer in model.transformer_encoder.layers])
