@@ -27,3 +27,8 @@ Le projet est prévu pour fonctionner avec python 3.8+
     python3 -m venv venv
     . venv/bin/activate
     pip install -r requirements.txt
+
+### Utilisation
+
+    python3 main.py
+    

@@ -7,7 +7,9 @@ from mido import Message, MidiFile, MidiTrack
 from sklearn.model_selection import train_test_split
 from torch import Tensor
 from torch.nn import (
-    CrossEntropyLoss, TransformerEncoderLayer,
+    CrossEntropyLoss,
+    MSELoss,
+    TransformerEncoderLayer,
     TransformerEncoder,
     Linear,
 )
@@ -16,33 +18,46 @@ from torch.utils.data import DataLoader
 import numpy as np
 from typing import List
 from heapq import heappush, heappop, nsmallest
+from random import randint
 
 BATCH_SIZE = 16
 
 midi_directory = "lmd_matched"
 fmidi = "lmd_matched/L/Z/U/TRLZURC128E079376E/cad555c70af4bd043445920c8bcb4b00.mid"
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+# Set to True to quickly test the processing pipeline (load data, learn, generate...)
 TEST = False
+# If True, train the model and save the model weights else load the weights
+TRAIN_MODEL = False
+# Path where the weights of the model are saved
+PATH = "model.h5"
+DATASET_SIZE = 10000
+INDEX_ENTRY = randint(0, 10000)
 EPOCHS = 1 if TEST else 500
 # Embedding dimension
 MIDI_NOTES = 128
 NOTES = MIDI_NOTES + 1 + 1  # START + STOP
-WINDOW_SIZE = 30
-WINDOW_SLIDE = 20
+VELOCITY_INDEX = NOTES
+DURATION_INDEX = NOTES + 1
+ENTRY_SIZE = NOTES + 1 + 1  # Velocity + Duration
+WINDOW_SIZE = 50
+WINDOW_SLIDE = 30
 WINDOW_INPUT = WINDOW_SIZE - 1
-
+MAX_VELOCITY = 127
 
 print(f"Using device {device}")
 
 
-def note(index: int) -> Tensor:
-    note_array = [0] * NOTES
+def note(index: int, velocity: int) -> Tensor:
+    note_array = [0] * ENTRY_SIZE
     note_array[index] = 1
+    note_array[VELOCITY_INDEX] = velocity
+    note_array[DURATION_INDEX] = 0  #TODO
     return torch.tensor(note_array)
 
 
-START = note(NOTES - 2)
-STOP = note(NOTES - 1)
+START = note(NOTES - 2, 0)
+STOP = note(NOTES - 1, 0)
 
 
 # for i, track in enumerate(mid.tracks):
@@ -90,9 +105,9 @@ def slice_midi_tracks(tracks):
     channels = []
     for msg in tracks:
         data = msg.dict()
-        if 'note' not in data:
+        if 'note' not in data or data['type'] != 'note_on':
             continue
-        channels.append(note(data['note']))
+        channels.append(note(data['note'], data['velocity'] / MAX_VELOCITY))
 
     slices = []
     for i in range(0, len(channels), WINDOW_SLIDE):
@@ -108,6 +123,7 @@ def slice_midi_tracks(tracks):
 def midi_file_to_batch_entry(midi_filename):
     tracks = []
     midi_file = MidiFile(midi_filename)
+    # print(f"midi_file = {midi_file.ticks_per_beat }")
     for i, track in enumerate(midi_file.tracks):
         channels = slice_midi_tracks(track)
         if channels is None:
@@ -138,13 +154,13 @@ class TransformerModel(torch.nn.Module):
 
     def __init__(self):
         super(TransformerModel, self).__init__()
-        self.pos_encoder = PositionalEncoding(NOTES, dropout=0.2)
+        self.pos_encoder = PositionalEncoding(ENTRY_SIZE, dropout=0.2)
         dim_feedforward = 200  # dimension of the feedforward network model in nn.TransformerEncoder
         nlayers = 2  # number of nn.TransformerEncoderLayer in nn.TransformerEncoder
         encoder_layers = TransformerEncoderLayer(
-            d_model=NOTES, nhead=NOTES, dim_feedforward=dim_feedforward, dropout=0.2, batch_first=True)
+            d_model=ENTRY_SIZE, nhead=ENTRY_SIZE, dim_feedforward=dim_feedforward, dropout=0.2, batch_first=True)
         self.transformer_encoder = TransformerEncoder(encoder_layers, nlayers)
-        self.decoder = Linear(in_features=NOTES, out_features=NOTES)
+        self.decoder = Linear(in_features=ENTRY_SIZE, out_features=ENTRY_SIZE)
         self.init_weights()
 
     def init_weights(self) -> None:
@@ -165,15 +181,18 @@ def evaluate_model(model: torch.nn.Module, eval_data: Tensor) -> float:
     eval_data = eval_data
     with torch.no_grad():
         inputs = eval_data[:, :-1, :]
-        expected_output = eval_data[:, 1:, :].to(device)
         output = model(inputs.to(device), src_mask)
-        loss = criterion(output, expected_output)
+        expected_output = eval_data[:, 1:, :].to(device)
+        expected_output_notes = expected_output[:, :, :NOTES]
+        expected_output_velocity = expected_output[:, :, VELOCITY_INDEX]
+        output_notes = output[:, :, :NOTES]
+        output_velocity = output[:, :, VELOCITY_INDEX]
+        loss = criterion_notes(output_notes, expected_output_notes) + criterion_velocity(output_velocity, expected_output_velocity)
     return loss
 
 
 def train_model(model, train_loader, criterion):
     model.train()
-    print("Epoch", epoch)
     src_mask = generate_square_subsequent_mask(WINDOW_INPUT)
     batch = 0
     log_interval = 100
@@ -183,13 +202,17 @@ def train_model(model, train_loader, criterion):
         # We input has all notes except the last
         # We use all notes to predict the last one
         inputs = window[:, :-1, :]
-        # the words we are trying to predict
-        expected_output = window[:, 1:, :].to(device)
         output = model(
             src=inputs.to(device),
             src_mask=src_mask,
         )
-        loss = criterion(output, expected_output)
+        # the notes we are trying to predict
+        expected_output = window[:, 1:, :].to(device)
+        expected_output_notes = expected_output[:, :, :NOTES]
+        expected_output_velocity = expected_output[:, :, VELOCITY_INDEX]
+        output_notes = output[:, :, :NOTES]
+        output_velocity = output[:, :, VELOCITY_INDEX]
+        loss = criterion_notes(output_notes, expected_output_notes) + criterion_velocity(output_velocity, expected_output_velocity)
         optim.zero_grad()
         loss.backward()
         # To avoid exploding gradients
@@ -201,8 +224,7 @@ def train_model(model, train_loader, criterion):
             ms_per_batch = (time.time() - start_time) * 1000 / log_interval
             cur_loss = total_loss / log_interval
             ppl = math.exp(cur_loss)
-            print(f'| epoch {epoch:3d} | ms/batch {ms_per_batch:5.2f} | '
-                  f'loss {cur_loss:5.2f} | ppl {ppl:8.2f}')
+            print(f'train;{epoch};{cur_loss};{ms_per_batch}')
             total_loss = 0
             start_time = time.time()
 
@@ -232,47 +254,55 @@ if __name__ == "__main__":
     for midi_file in midi_files:
         fmidi_notes = torch.cat((fmidi_notes, midi_file_to_batch_entry(fmidi)))
 
-    fmidi_notes = fmidi_notes[:10000, :, :]
-    print(fmidi_notes.shape)
-    train = fmidi_notes.to(device)
-    x_train, x_validation = train_test_split(fmidi_notes, test_size=0.1, train_size=0.9)
-    x_train = x_train
-    x_validation = x_validation
     model = TransformerModel()
     model = model.to(device)
-    # Other choices: SGD, ...
-    optim = AdamW(model.parameters(), lr=5e-5)
+    if TRAIN_MODEL:
+        fmidi_notes = fmidi_notes[:DATASET_SIZE, :, :]
+        print(fmidi_notes.shape)
+        train = fmidi_notes.to(device)
+        x_train, x_validation = train_test_split(fmidi_notes, test_size=0.1, train_size=0.9)
+        x_train = x_train
+        x_validation = x_validation
+        # Other choices: SGD, ...
+        optim = AdamW(model.parameters(), lr=5e-5)
 
-    train_loader = DataLoader(x_train, batch_size=BATCH_SIZE, shuffle=True)
-    criterion = CrossEntropyLoss()
+        train_loader = DataLoader(x_train, batch_size=BATCH_SIZE, shuffle=True)
+        criterion_notes = CrossEntropyLoss()
+        criterion_velocity = MSELoss()
 
-    for epoch in range(EPOCHS):
-        train_model(model, train_loader, criterion)
-        val_loss = evaluate_model(model, x_validation)
-        val_ppl = math.exp(val_loss)
-        print('-' * 89)
-        print(f'| end of epoch {epoch:3d} | valid loss {val_loss:5.2f} | valid ppl {val_ppl:8.2f}')
-        print('-' * 89)
-    print("Apprentissage terminé !!")
+        print(f'type;epoch;loss;others')
+        for epoch in range(EPOCHS):
+            train_model(model, train_loader, criterion_notes)
+            test_loss = evaluate_model(model, x_validation)
+            print(f'test;{epoch};{test_loss};')
+        print("Apprentissage terminé !!")
+
+        torch.save(model.state_dict(), "model.h5")
+
+    else:
+        model.load_state_dict(torch.load(PATH))
+
 
     src_mask = generate_square_subsequent_mask(WINDOW_INPUT)
     log_softmax = torch.nn.LogSoftmax(dim=1)
     with torch.no_grad():
         model.eval()
-        data = train[0][:-1, :].to(device)
+        data = fmidi_notes[INDEX_ENTRY][:-1, :].to(device)
         dataset = data.unsqueeze(0)
         h = []
         heappush(h, (0, dataset))
         for i in range(100):
             total_log_prob, dataset = heappop(h)
-            output = model(
+            output_all = model(
                 src=dataset[:, -WINDOW_INPUT:, :],
                 src_mask=src_mask)
+            output = output_all[:, :, :NOTES]
             output_flat = -log_softmax(output.view(-1, NOTES))
             label_id = torch.argmin(output_flat[-1]).cpu().item()
             log_prob = output_flat[-1][label_id].cpu().item()
             print(f"label_id = {label_id}, log_prob = {log_prob}")
-            data = torch.cat((data, note(label_id).unsqueeze(0).to(device)))
+            new_note = note(label_id, 63).unsqueeze(0).to(device)
+            data = torch.cat((data, new_note))
             dataset = data.unsqueeze(0)
             total_log_prob += log_prob
             if label_id >= MIDI_NOTES:
@@ -280,9 +310,10 @@ if __name__ == "__main__":
             heappush(h, (total_log_prob, dataset))
             h = nsmallest(3, h)
 
-    _, result = np.where(train[0][:-1, :].cpu())
+    _, result = np.where(fmidi_notes[INDEX_ENTRY][:-1, :NOTES].cpu())
     result = result.tolist()
     prob, t = h[0]
+    t = t[:, :, :NOTES]
     generated = np.where(t.cpu())[2]
     result = result + generated.tolist()
 

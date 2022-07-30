@@ -5,3 +5,4 @@ pytorch-transformers
 #transformers[sentencepiece]
 sklearn
 numpy
+matplotlib
