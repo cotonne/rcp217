@@ -28,11 +28,11 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # Set to True to quickly test the processing pipeline (load data, learn, generate...)
 TEST = False
 # If True, train the model and save the model weights else load the weights
-TRAIN_MODEL = False
+TRAIN_MODEL = True
 # Path where the weights of the model are saved
 PATH = "model.h5"
 DATASET_SIZE = 10000
-INDEX_ENTRY = randint(0, 10000)
+INDEX_ENTRY = 0 if TEST else randint(0, 10000)
 EPOCHS = 1 if TEST else 500
 # Embedding dimension
 MIDI_NOTES = 128
@@ -122,7 +122,12 @@ def slice_midi_tracks(tracks):
 
 def midi_file_to_batch_entry(midi_filename):
     tracks = []
-    midi_file = MidiFile(midi_filename)
+    try:
+        midi_file = MidiFile(midi_filename)
+    except Exception as e:
+        print(f"Fail to read file. Current file : {midi_filename}")
+        print(e)
+        return torch.empty((0))
     # print(f"midi_file = {midi_file.ticks_per_beat }")
     for i, track in enumerate(midi_file.tracks):
         channels = slice_midi_tracks(track)
@@ -240,19 +245,23 @@ def save_to_midi(notes: List[int], filename='generated.mid'):
     mid.save(filename)
 
 
+def load_dataset():
+    midi_files = []
+    for (dirpath, dirnames, filenames) in os.walk(midi_directory):
+        midi_files += [os.path.join(dirpath, file) for file in filenames]
+    f_midi_notes = torch.empty((0))
+    if TEST:
+        midi_files = midi_files[:1]
+    for midi_file in midi_files:
+        f_midi_notes = torch.cat((f_midi_notes, midi_file_to_batch_entry(midi_file)))
+    return f_midi_notes
+
+
 if __name__ == "__main__":
     new_song_notes = midi_file_to_batch_entry("new_song.mid")
     print(new_song_notes.shape)
     print("--")
-    midi_files = []
-    for (dirpath, dirnames, filenames) in os.walk(midi_directory):
-        midi_files += [os.path.join(dirpath, file) for file in filenames]
-
-    fmidi_notes = torch.empty((0))
-    if TEST:
-        midi_files = midi_files[:1]
-    for midi_file in midi_files:
-        fmidi_notes = torch.cat((fmidi_notes, midi_file_to_batch_entry(fmidi)))
+    fmidi_notes = load_dataset()
 
     model = TransformerModel()
     model = model.to(device)
